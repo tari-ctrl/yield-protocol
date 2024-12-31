@@ -177,6 +177,18 @@
     )
 )
 
+(define-private (validate-token-extended (token-trait <sip-010-trait>))
+    (begin
+        ;; Check if name call succeeds (returns ok)
+        (try! (contract-call? token-trait get-name))
+        ;; Check if symbol call succeeds (returns ok)
+        (try! (contract-call? token-trait get-symbol))
+        ;; Validate token whitelist status
+        (try! (validate-token token-trait))
+        (ok true)
+    )
+)
+
 ;; Deposit Management Functions
 (define-public (deposit (token-trait <sip-010-trait>) (amount uint))
     (let
@@ -185,24 +197,31 @@
             (current-deposit (default-to { amount: u0, last-deposit-block: u0 } 
                 (map-get? user-deposits { user: user-principal })))
         )
-        (try! (validate-token token-trait))
+        ;; Additional validation
+        (try! (validate-token-extended token-trait))
+        (asserts! (> amount u0) ERR-INVALID-AMOUNT)
         (asserts! (not (var-get emergency-shutdown)) ERR-STRATEGY-DISABLED)
         (asserts! (>= amount (var-get min-deposit)) ERR-MIN-DEPOSIT-NOT-MET)
         (asserts! (<= (+ amount (get amount current-deposit)) (var-get max-deposit)) ERR-MAX-DEPOSIT-REACHED)
         
-        (try! (safe-token-transfer token-trait amount user-principal (as-contract tx-sender)))
-        
-        (map-set user-deposits 
-            { user: user-principal }
-            { 
-                amount: (+ amount (get amount current-deposit)),
-                last-deposit-block: block-height
-            })
-        
-        (var-set total-tvl (+ (var-get total-tvl) amount))
-        
-        (try! (rebalance-protocols))
-        (ok true)
+        ;; Verify user balance before transfer
+        (let ((user-balance (try! (contract-call? token-trait get-balance tx-sender))))
+            (asserts! (>= user-balance amount) ERR-INSUFFICIENT-BALANCE)
+            
+            (try! (safe-token-transfer token-trait amount user-principal (as-contract tx-sender)))
+            
+            (map-set user-deposits 
+                { user: user-principal }
+                { 
+                    amount: (+ amount (get amount current-deposit)),
+                    last-deposit-block: block-height
+                })
+            
+            (var-set total-tvl (+ (var-get total-tvl) amount))
+            
+            (try! (rebalance-protocols))
+            (ok true)
+        )
     )
 )
 
@@ -213,22 +232,29 @@
             (current-deposit (default-to { amount: u0, last-deposit-block: u0 }
                 (map-get? user-deposits { user: user-principal })))
         )
-        (try! (validate-token token-trait))
+        ;; Additional validation
+        (try! (validate-token-extended token-trait))
+        (asserts! (> amount u0) ERR-INVALID-AMOUNT)
         (asserts! (<= amount (get amount current-deposit)) ERR-INSUFFICIENT-BALANCE)
         
-        (map-set user-deposits
-            { user: user-principal }
-            {
-                amount: (- (get amount current-deposit) amount),
-                last-deposit-block: (get last-deposit-block current-deposit)
-            })
-        
-        (var-set total-tvl (- (var-get total-tvl) amount))
-        
-        (as-contract
-            (try! (safe-token-transfer token-trait amount tx-sender user-principal)))
-        
-        (ok true)
+        ;; Verify contract balance before transfer
+        (let ((contract-balance (try! (contract-call? token-trait get-balance (as-contract tx-sender)))))
+            (asserts! (>= contract-balance amount) ERR-INSUFFICIENT-BALANCE)
+            
+            (map-set user-deposits
+                { user: user-principal }
+                {
+                    amount: (- (get amount current-deposit) amount),
+                    last-deposit-block: (get last-deposit-block current-deposit)
+                })
+            
+            (var-set total-tvl (- (var-get total-tvl) amount))
+            
+            (as-contract
+                (try! (safe-token-transfer token-trait amount tx-sender user-principal)))
+            
+            (ok true)
+        )
     )
 )
 
@@ -340,6 +366,8 @@
 (define-public (set-emergency-shutdown (shutdown bool))
     (begin
         (asserts! (is-contract-owner) ERR-NOT-AUTHORIZED)
+        ;; Add check to prevent redundant state changes
+        (asserts! (not (is-eq shutdown (var-get emergency-shutdown))) ERR-INVALID-AMOUNT)
         (var-set emergency-shutdown shutdown)
         (ok true)
     )
@@ -348,6 +376,10 @@
 (define-public (whitelist-token (token principal))
     (begin
         (asserts! (is-contract-owner) ERR-NOT-AUTHORIZED)
+        ;; Check if token is already whitelisted
+        (asserts! (not (default-to false 
+            (get approved (map-get? whitelisted-tokens { token: token })))) 
+            ERR-PROTOCOL-EXISTS)
         (map-set whitelisted-tokens { token: token } { approved: true })
         (ok true)
     )
