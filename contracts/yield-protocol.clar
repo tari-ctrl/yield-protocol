@@ -108,6 +108,13 @@
     )
 )
 
+(define-private (is-valid-token-principal (token principal))
+    (and
+        (not (is-eq token contract-owner))  ;; Prevent setting owner as token
+        (not (is-eq token (as-contract tx-sender)))  ;; Prevent setting self as token
+    )
+)
+
 (define-private (protocol-exists (protocol-id uint))
     (is-some (map-get? protocols { protocol-id: protocol-id }))
 )
@@ -280,10 +287,13 @@
 (define-public (claim-rewards (token-trait <sip-010-trait>))
     (let
         (
+            (token-principal (contract-of token-trait))
             (user-principal tx-sender)
             (rewards (calculate-rewards user-principal (- block-height 
                 (get last-deposit-block (unwrap-panic (get-user-deposit user-principal))))))
         )
+        ;; Add validation before processing
+        (asserts! (is-valid-token-principal token-principal) ERR-INVALID-TOKEN)
         (try! (validate-token token-trait))
         (asserts! (> rewards u0) ERR-INVALID-AMOUNT)
         
@@ -376,6 +386,8 @@
 (define-public (whitelist-token (token principal))
     (begin
         (asserts! (is-contract-owner) ERR-NOT-AUTHORIZED)
+        ;; Add validation for token principal
+        (asserts! (is-valid-token-principal token) ERR-INVALID-TOKEN)
         ;; Check if token is already whitelisted
         (asserts! (not (default-to false 
             (get approved (map-get? whitelisted-tokens { token: token })))) 
